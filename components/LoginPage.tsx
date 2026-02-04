@@ -1,38 +1,47 @@
 import React, { useState, useEffect } from 'react';
 import { DiscordIcon } from './DiscordIcon';
-import { ShieldCheck, Lock, Cpu, LogOut, UserCheck, AlertTriangle, Ban, Users, Search, Circle, ExternalLink } from 'lucide-react';
+import { ShieldCheck, Lock, Cpu, LogOut, Ban, Users, Search, RefreshCw, AlertCircle } from 'lucide-react';
 
 // ==========================================
 // КОНФИГУРАЦИЯ
 // ==========================================
 const DISCORD_CLIENT_ID = '1468331655646417203'; 
-const REDIRECT_URI = 'https://o-auth2-null-x.vercel.app/'; 
 const TARGET_GUILD_ID = '1458138848822431770'; 
 const STAFF_ROLE_ID = '1458158245700046901'; 
+
+// Функция для выбора правильного Redirect URI в зависимости от того, где мы (локально или на сайте)
+const getRedirectUri = () => {
+  if (typeof window !== 'undefined' && window.location.hostname === 'localhost') {
+    return 'http://localhost:3000/';
+  }
+  return 'https://o-auth2-null-x.vercel.app/';
+};
 
 interface DiscordUser {
   id: string;
   username: string;
-  avatar: string;
+  avatar: string | null;
   discriminator: string;
-  email?: string;
+  global_name?: string;
 }
 
-interface StaffMember {
+// Интерфейс данных из Widget JSON
+interface WidgetMember {
+  id: string;
+  username: string;
+  status: string;
+  avatar_url: string;
+  game?: { name: string };
+}
+
+interface StaffDisplay {
   id: string;
   username: string;
   avatarUrl: string;
-  role: 'Administrator' | 'Moderator' | 'Support' | 'Staff';
-  status: 'online' | 'idle' | 'dnd' | 'offline';
+  roleName: string;
+  isCurrentUser: boolean;
+  status: string;
 }
-
-const MOCK_STAFF_LIST: StaffMember[] = [
-  { id: '1', username: 'Nexus', avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Nexus', role: 'Administrator', status: 'online' },
-  { id: '2', username: 'Cipher', avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Cipher', role: 'Moderator', status: 'dnd' },
-  { id: '3', username: 'Void', avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Void', role: 'Support', status: 'idle' },
-  { id: '4', username: 'Glitch', avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Glitch', role: 'Staff', status: 'online' },
-  { id: '5', username: 'Echo', avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Echo', role: 'Moderator', status: 'offline' },
-];
 
 const LoginPage: React.FC = () => {
   const [mainLogoError, setMainLogoError] = useState(false);
@@ -42,8 +51,10 @@ const LoginPage: React.FC = () => {
   const [statusMessage, setStatusMessage] = useState<string>('');
   
   // Staff List State
-  const [staffList, setStaffList] = useState<StaffMember[]>([]);
+  const [staffList, setStaffList] = useState<StaffDisplay[]>([]);
+  const [isStaffLoading, setIsStaffLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [widgetError, setWidgetError] = useState(false);
 
   useEffect(() => {
     const fragment = new URLSearchParams(window.location.hash.slice(1));
@@ -58,16 +69,18 @@ const LoginPage: React.FC = () => {
   const verifyUserAndRole = async (token: string) => {
     setLoading(true);
     setAccessDenied(false);
-    setStatusMessage('Identifying user...');
+    setStatusMessage('Authenticating...');
 
     try {
+      // 1. Получаем данные текущего пользователя
       const userRes = await fetch('https://discord.com/api/users/@me', {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!userRes.ok) throw new Error('Failed to fetch user');
       const userData = await userRes.json();
 
-      setStatusMessage('Checking clearance...');
+      // 2. Проверяем его права на сервере
+      setStatusMessage('Verifying Clearance...');
       const memberRes = await fetch(`https://discord.com/api/users/@me/guilds/${TARGET_GUILD_ID}/member`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -79,15 +92,13 @@ const LoginPage: React.FC = () => {
         return;
       }
 
-      if (!memberRes.ok) throw new Error('Failed to fetch guild member info');
-
       const memberData = await memberRes.json();
       const roles: string[] = memberData.roles || [];
 
       if (roles.includes(STAFF_ROLE_ID)) {
         setUser(userData);
-        // Загружаем список сотрудников (симуляция, т.к. API не дает список юзеров без бота)
-        loadStaffList();
+        // Запускаем получение списка через Widget API (единственный способ без бэкенда)
+        fetchWidgetMembers(userData.id);
       } else {
         setAccessDenied(true);
       }
@@ -100,17 +111,77 @@ const LoginPage: React.FC = () => {
     }
   };
 
-  const loadStaffList = () => {
-    // В реальном приложении здесь был бы запрос к вашему API боту
-    // Поскольку User Token не имеет права получать список участников гильдии, используем мок
-    setTimeout(() => {
-        setStaffList(MOCK_STAFF_LIST);
-    }, 800);
+  const fetchWidgetMembers = async (currentUserId: string) => {
+    setIsStaffLoading(true);
+    setWidgetError(false);
+    try {
+      // Используем публичный Widget JSON.
+      // ВАЖНО: В настройках сервера Discord должна быть включена галочка "Enable Server Widget"
+      const response = await fetch(`https://discord.com/api/guilds/${TARGET_GUILD_ID}/widget.json`);
+
+      if (response.status === 403) {
+        throw new Error('Widget disabled');
+      }
+      
+      const data = await response.json();
+      const members: WidgetMember[] = data.members || [];
+
+      // Преобразуем данные
+      // Примечание: Виджет показывает только ОНЛАЙН пользователей.
+      // Виджет НЕ отдает ID ролей, поэтому мы считаем всех, кто в виджете (и онлайн) - активными участниками.
+      const formattedStaff: StaffDisplay[] = members.map(m => ({
+        id: m.id,
+        username: m.username,
+        avatarUrl: m.avatar_url,
+        roleName: 'Active Member', // Виджет не отдает точные роли, пишем статус
+        status: m.status,
+        isCurrentUser: m.id === currentUserId
+      }));
+
+      // Если текущего пользователя нет в списке (например он в инвизе), добавляем его вручную
+      const isUserInList = formattedStaff.find(m => m.isCurrentUser);
+      if (!isUserInList && user) {
+        formattedStaff.unshift({
+            id: user.id,
+            username: user.username,
+            avatarUrl: user.avatar ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png` : 'https://cdn.discordapp.com/embed/avatars/0.png',
+            roleName: 'Staff Member',
+            status: 'online',
+            isCurrentUser: true
+        });
+      }
+      
+      // Сортируем: сначала текущий юзер, потом остальные
+      formattedStaff.sort((a, b) => {
+        if (a.isCurrentUser) return -1;
+        if (b.isCurrentUser) return 1;
+        return a.username.localeCompare(b.username);
+      });
+
+      setStaffList(formattedStaff);
+
+    } catch (e) {
+      console.error("Widget fetch failed:", e);
+      setWidgetError(true);
+      // Если ошибка виджета, показываем хотя бы себя
+      if (user) {
+         setStaffList([{
+            id: user.id,
+            username: user.username,
+            avatarUrl: user.avatar ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png` : 'https://cdn.discordapp.com/embed/avatars/0.png',
+            roleName: 'Staff Member',
+            status: 'online',
+            isCurrentUser: true
+         }]);
+      }
+    } finally {
+      setIsStaffLoading(false);
+    }
   };
 
   const handleLogin = () => {
     const scope = encodeURIComponent('identify guilds.members.read');
-    const redirect = encodeURIComponent(REDIRECT_URI);
+    const redirect = encodeURIComponent(getRedirectUri());
     const url = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${redirect}&response_type=token&scope=${scope}`;
     window.location.href = url;
   };
@@ -154,10 +225,7 @@ const LoginPage: React.FC = () => {
                     : 'bg-[#0a0a0a]/90 border-white/5 p-10 md:p-14'
             }`}>
           
-          {/* 
-            HEADER SECTION 
-            (Compact version for Dashboard, Full for Login)
-          */}
+          {/* HEADER SECTION */}
           {!user && (
               <div className="text-center mb-12 relative w-full flex flex-col items-center">
                 {!mainLogoError ? (
@@ -184,10 +252,7 @@ const LoginPage: React.FC = () => {
               </div>
           )}
 
-          {/* 
-             STATE MANAGER
-          */}
-
+          {/* STATE MANAGER */}
           {loading ? (
             <div className="flex flex-col items-center gap-4 py-10">
               <div className="w-10 h-10 border-2 border-purple-500/30 border-t-purple-500 rounded-full animate-spin"></div>
@@ -225,7 +290,7 @@ const LoginPage: React.FC = () => {
                             <h3 className="text-lg font-bold text-white truncate">{user.username}</h3>
                             <div className="flex items-center gap-2 text-[10px] text-emerald-500 font-bold uppercase tracking-wider">
                                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                                Online
+                                Authorized
                             </div>
                         </div>
                     </div>
@@ -254,12 +319,16 @@ const LoginPage: React.FC = () => {
                     <div className="flex items-center justify-between mb-6">
                         <div>
                             <h2 className="text-2xl font-bold flex items-center gap-3">
-                                Staff Directory
+                                Active Personnel
                                 <span className="text-xs bg-purple-500/20 text-purple-300 px-2 py-1 rounded-md border border-purple-500/20">
-                                    {staffList.length} Active
+                                    {isStaffLoading ? '...' : staffList.length}
                                 </span>
                             </h2>
-                            <p className="text-xs text-zinc-500 mt-1">Authorized personnel currently on database.</p>
+                            <p className="text-xs text-zinc-500 mt-1">
+                                {widgetError 
+                                    ? <span className="text-red-400 flex items-center gap-1"><AlertCircle className="w-3 h-3"/> Enable "Server Widget" in Discord Settings!</span> 
+                                    : 'Real-time database from server widget.'}
+                            </p>
                         </div>
                         <div className="hidden md:block p-2 bg-white/5 rounded-full">
                             <Users className="w-5 h-5 text-zinc-400" />
@@ -271,7 +340,7 @@ const LoginPage: React.FC = () => {
                         <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500 group-focus-within:text-purple-400 transition-colors" />
                         <input 
                             type="text" 
-                            placeholder="Search staff members..." 
+                            placeholder="Search personnel..." 
                             value={searchQuery}
                             onChange={(e) => setSearchQuery(e.target.value)}
                             className="w-full bg-[#050505] border border-white/10 rounded-xl py-3 pl-10 pr-4 text-sm text-zinc-300 focus:outline-none focus:border-purple-500/50 transition-all placeholder:text-zinc-700"
@@ -280,7 +349,12 @@ const LoginPage: React.FC = () => {
 
                     {/* List */}
                     <div className="flex-1 overflow-y-auto max-h-[400px] pr-2 space-y-2 custom-scrollbar">
-                        {filteredStaff.length > 0 ? (
+                        {isStaffLoading ? (
+                             <div className="flex flex-col items-center justify-center py-12 gap-2 text-zinc-500">
+                                <RefreshCw className="w-6 h-6 animate-spin" />
+                                <span className="text-[10px] uppercase tracking-widest">Syncing Database...</span>
+                             </div>
+                        ) : filteredStaff.length > 0 ? (
                             filteredStaff.map((member) => (
                                 <div key={member.id} className="group flex items-center justify-between p-3 rounded-xl bg-white/[0.02] border border-white/[0.02] hover:bg-white/[0.05] hover:border-purple-500/30 transition-all duration-300">
                                     <div className="flex items-center gap-3">
@@ -288,28 +362,24 @@ const LoginPage: React.FC = () => {
                                             <img src={member.avatarUrl} alt={member.username} className="w-10 h-10 rounded-full bg-zinc-800" />
                                             <div className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-[#0a0a0a] 
                                                 ${member.status === 'online' ? 'bg-emerald-500' : 
-                                                  member.status === 'dnd' ? 'bg-red-500' : 
-                                                  member.status === 'idle' ? 'bg-yellow-500' : 'bg-zinc-500'}`} 
-                                            />
+                                                  member.status === 'idle' ? 'bg-yellow-500' : 
+                                                  member.status === 'dnd' ? 'bg-red-500' : 'bg-zinc-500'}`}></div>
                                         </div>
                                         <div>
                                             <h4 className="text-sm font-bold text-zinc-200 group-hover:text-white transition-colors">{member.username}</h4>
-                                            <span className={`text-[10px] font-semibold uppercase tracking-wider
-                                                ${member.role === 'Administrator' ? 'text-red-400' : 
-                                                  member.role === 'Moderator' ? 'text-blue-400' : 
-                                                  'text-zinc-500'}`}>
-                                                {member.role}
+                                            <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider group-hover:text-purple-400 transition-colors">
+                                                {member.roleName}
                                             </span>
                                         </div>
                                     </div>
-                                    <button className="opacity-0 group-hover:opacity-100 p-2 hover:bg-white/10 rounded-lg transition-all text-zinc-400 hover:text-white">
-                                        <ExternalLink className="w-4 h-4" />
-                                    </button>
+                                    {member.isCurrentUser && (
+                                       <div className="text-[9px] bg-purple-500/20 text-purple-300 px-2 py-0.5 rounded border border-purple-500/20">YOU</div>
+                                    )}
                                 </div>
                             ))
                         ) : (
                             <div className="text-center py-10 text-zinc-600 text-xs uppercase tracking-widest">
-                                No members found
+                                {widgetError ? 'Widget Disabled' : 'No active members found'}
                             </div>
                         )}
                     </div>
