@@ -7,12 +7,49 @@ import { ShieldCheck, Lock, Cpu, LogOut, Ban, Users, Search, RefreshCw, AlertCir
 // ==========================================
 const DISCORD_CLIENT_ID = '1468331655646417203'; 
 const TARGET_GUILD_ID = '1458138848822431770'; 
-const STAFF_ROLE_ID = '1458158245700046901'; 
+const STAFF_ROLE_ID = '1458158245700046901'; // ID роли, дающей доступ к панели
 
-// Функция для выбора правильного Redirect URI в зависимости от того, где мы (локально или на сайте)
+// 1. КОНФИГУРАЦИЯ РОЛЕЙ (ОТ НИЗШЕГО К ВЫСШЕМУ)
+const ROLE_DEFINITIONS: Record<string, { name: string, color: string, weight: number }> = {
+    // Trainee
+    "1459285694458626222": { name: "Стажёр", color: "text-blue-400", weight: 1 },
+    // Jr Moder
+    "1458158059187732666": { name: "Младший модератор", color: "text-emerald-400", weight: 2 },
+    // Moder
+    "1458158896894967879": { name: "Модератор", color: "text-purple-400", weight: 3 },
+    // Sr Moder
+    "1458159110720589944": { name: "Старший модератор", color: "text-red-500", weight: 4 },
+    // Chief Moder
+    "1458159802105594061": { name: "Шеф модератор", color: "text-red-600", weight: 5 },
+    // Curator
+    "1458277039399374991": { name: "Куратор", color: "text-amber-400", weight: 6 },
+};
+
+// 2. СПРАВОЧНИК СОТРУДНИКОВ (ID -> RoleID)
+// Внесите сюда ID своих сотрудников, чтобы:
+// а) Видеть их роль (Куратор, Модератор и т.д.) вместо "Active Staff".
+// б) Видеть их в списке, даже если они OFFLINE (Inactive).
+interface KnownStaff {
+    id: string;
+    roleId: string;
+    fallbackName: string; // Имя для отображения, если юзер offline и виджет его не видит
+}
+
+const KNOWN_STAFF_DIRECTORY: KnownStaff[] = [
+    // ПРИМЕРЫ (Замените ID на реальные ID ваших сотрудников):
+    // { id: "123456789", roleId: "1458159110720589944", fallbackName: "Egorov" },
+    // { id: "987654321", roleId: "1458158896894967879", fallbackName: "lowcode" },
+    
+    // Тестовый неактивный пользователь для демонстрации:
+    { id: "000000000000000001", roleId: "1458277039399374991", fallbackName: "Offline Curator (Example)" },
+];
+
+// Функция для выбора правильного Redirect URI
 const getRedirectUri = () => {
-  if (typeof window !== 'undefined' && window.location.hostname === 'localhost') {
-    return 'http://localhost:3000/';
+  if (typeof window !== 'undefined') {
+      const host = window.location.hostname;
+      if (host === 'localhost') return 'http://localhost:3000/';
+      if (host === '192.168.1.5') return 'http://192.168.1.5:3000/';
   }
   return 'https://o-auth2-null-x.vercel.app/';
 };
@@ -23,9 +60,9 @@ interface DiscordUser {
   avatar: string | null;
   discriminator: string;
   global_name?: string;
+  roles?: string[]; 
 }
 
-// Интерфейс данных из Widget JSON
 interface WidgetMember {
   id: string;
   username: string;
@@ -39,13 +76,17 @@ interface StaffDisplay {
   username: string;
   avatarUrl: string;
   roleName: string;
+  roleColor?: string; 
   isCurrentUser: boolean;
   status: string;
+  weight: number; // Для сортировки
 }
 
 const LoginPage: React.FC = () => {
   const [mainLogoError, setMainLogoError] = useState(false);
   const [user, setUser] = useState<DiscordUser | null>(null);
+  const [userRoleInfo, setUserRoleInfo] = useState<{name: string, color: string} | null>(null);
+  
   const [loading, setLoading] = useState(false);
   const [accessDenied, setAccessDenied] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string>('');
@@ -66,20 +107,31 @@ const LoginPage: React.FC = () => {
     }
   }, []);
 
+  // Вспомогательная функция для определения лучшей роли из списка ID ролей
+  const getBestRole = (roles: string[]) => {
+      let bestRole = { name: 'Staff Member', color: 'text-zinc-500', weight: 0 };
+      
+      roles.forEach(roleId => {
+          const def = ROLE_DEFINITIONS[roleId];
+          if (def && def.weight > bestRole.weight) {
+              bestRole = def;
+          }
+      });
+      return bestRole;
+  };
+
   const verifyUserAndRole = async (token: string) => {
     setLoading(true);
     setAccessDenied(false);
     setStatusMessage('Authenticating...');
 
     try {
-      // 1. Получаем данные текущего пользователя
       const userRes = await fetch('https://discord.com/api/users/@me', {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!userRes.ok) throw new Error('Failed to fetch user');
       const userData = await userRes.json();
 
-      // 2. Проверяем его права на сервере
       setStatusMessage('Verifying Clearance...');
       const memberRes = await fetch(`https://discord.com/api/users/@me/guilds/${TARGET_GUILD_ID}/member`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -96,9 +148,12 @@ const LoginPage: React.FC = () => {
       const roles: string[] = memberData.roles || [];
 
       if (roles.includes(STAFF_ROLE_ID)) {
-        setUser(userData);
-        // Запускаем получение списка через Widget API (единственный способ без бэкенда)
-        fetchWidgetMembers(userData.id);
+        setUser({ ...userData, roles });
+        const roleInfo = getBestRole(roles);
+        setUserRoleInfo(roleInfo);
+        
+        // Запускаем сборку списка сотрудников
+        fetchStaffList(userData.id, roles, userData, roleInfo);
       } else {
         setAccessDenied(true);
       }
@@ -111,12 +166,36 @@ const LoginPage: React.FC = () => {
     }
   };
 
-  const fetchWidgetMembers = async (currentUserId: string) => {
+  const fetchStaffList = async (
+      currentUserId: string, 
+      currentUserRoles: string[], 
+      currentUserData: any,
+      currentUserRoleInfo: {name: string, color: string, weight?: number}
+    ) => {
     setIsStaffLoading(true);
     setWidgetError(false);
+    
+    // Словарь для быстрого доступа к списку сотрудников
+    const staffMap = new Map<string, StaffDisplay>();
+
+    // 1. Сначала добавляем всех из KNOWN_STAFF_DIRECTORY (по умолчанию считаем offline)
+    KNOWN_STAFF_DIRECTORY.forEach(known => {
+        const roleDef = ROLE_DEFINITIONS[known.roleId] || { name: 'Staff Member', color: 'text-zinc-500', weight: 0 };
+        
+        staffMap.set(known.id, {
+            id: known.id,
+            username: known.fallbackName,
+            avatarUrl: 'https://cdn.discordapp.com/embed/avatars/0.png', // Дефолт, если виджет не найдет
+            roleName: roleDef.name,
+            roleColor: roleDef.color,
+            status: 'offline', // По умолчанию
+            isCurrentUser: known.id === currentUserId,
+            weight: roleDef.weight
+        });
+    });
+
     try {
-      // Используем публичный Widget JSON.
-      // ВАЖНО: В настройках сервера Discord должна быть включена галочка "Enable Server Widget"
+      // 2. Получаем онлайн пользователей через Widget
       const response = await fetch(`https://discord.com/api/guilds/${TARGET_GUILD_ID}/widget.json`);
 
       if (response.status === 403) {
@@ -126,57 +205,80 @@ const LoginPage: React.FC = () => {
       const data = await response.json();
       const members: WidgetMember[] = data.members || [];
 
-      // Преобразуем данные
-      // Примечание: Виджет показывает только ОНЛАЙН пользователей.
-      // Виджет НЕ отдает ID ролей, поэтому мы считаем всех, кто в виджете (и онлайн) - активными участниками.
-      const formattedStaff: StaffDisplay[] = members.map(m => ({
-        id: m.id,
-        username: m.username,
-        avatarUrl: m.avatar_url,
-        roleName: 'Active Member', // Виджет не отдает точные роли, пишем статус
-        status: m.status,
-        isCurrentUser: m.id === currentUserId
-      }));
+      // 3. Мержим данные виджета
+      members.forEach(m => {
+          if (m.id === currentUserId) return; // Пропускаем себя, добавим в конце
 
-      // Если текущего пользователя нет в списке (например он в инвизе), добавляем его вручную
-      const isUserInList = formattedStaff.find(m => m.isCurrentUser);
-      if (!isUserInList && user) {
-        formattedStaff.unshift({
-            id: user.id,
-            username: user.username,
-            avatarUrl: user.avatar ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png` : 'https://cdn.discordapp.com/embed/avatars/0.png',
-            roleName: 'Staff Member',
-            status: 'online',
-            isCurrentUser: true
-        });
-      }
-      
-      // Сортируем: сначала текущий юзер, потом остальные
-      formattedStaff.sort((a, b) => {
-        if (a.isCurrentUser) return -1;
-        if (b.isCurrentUser) return 1;
-        return a.username.localeCompare(b.username);
+          const existing = staffMap.get(m.id);
+          
+          if (existing) {
+              // Если юзер есть в справочнике -> обновляем статус, аватар и имя
+              existing.status = m.status;
+              existing.avatarUrl = m.avatar_url;
+              existing.username = m.username; // Обновляем имя на актуальное
+          } else {
+              // Если юзера нет в справочнике -> добавляем как обычного активного стаффа
+              staffMap.set(m.id, {
+                  id: m.id,
+                  username: m.username,
+                  avatarUrl: m.avatar_url,
+                  roleName: 'Active Staff',
+                  roleColor: 'text-zinc-500',
+                  status: m.status,
+                  isCurrentUser: false,
+                  weight: 0
+              });
+          }
       });
-
-      setStaffList(formattedStaff);
-
+      
     } catch (e) {
       console.error("Widget fetch failed:", e);
       setWidgetError(true);
-      // Если ошибка виджета, показываем хотя бы себя
-      if (user) {
-         setStaffList([{
-            id: user.id,
-            username: user.username,
-            avatarUrl: user.avatar ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png` : 'https://cdn.discordapp.com/embed/avatars/0.png',
-            roleName: 'Staff Member',
-            status: 'online',
-            isCurrentUser: true
-         }]);
-      }
-    } finally {
-      setIsStaffLoading(false);
     }
+
+    // 4. Добавляем ТЕКУЩЕГО пользователя (перезаписываем, чтобы данные были точными)
+    // Текущий пользователь всегда Online для себя
+    staffMap.set(currentUserId, {
+        id: currentUserId,
+        username: currentUserData.username,
+        avatarUrl: currentUserData.avatar 
+            ? `https://cdn.discordapp.com/avatars/${currentUserId}/${currentUserData.avatar}.png` 
+            : 'https://cdn.discordapp.com/embed/avatars/0.png',
+        roleName: currentUserRoleInfo.name,
+        roleColor: currentUserRoleInfo.color,
+        status: 'online',
+        isCurrentUser: true,
+        weight: 100 // Всегда сверху или спец сортировка
+    });
+
+    // 5. Превращаем Map в массив и сортируем
+    const finalArray = Array.from(staffMap.values());
+
+    finalArray.sort((a, b) => {
+        if (a.isCurrentUser) return -1;
+        if (b.isCurrentUser) return 1;
+
+        // Сортировка по весу роли (Curator > Chief > ... > Trainee > Active Staff)
+        if (a.weight !== b.weight) {
+            return b.weight - a.weight;
+        }
+
+        // Если роли равны, сортировка по статусу
+        const statusWeight = (s: string) => {
+            if (s === 'online') return 3;
+            if (s === 'idle') return 2;
+            if (s === 'dnd') return 1;
+            return 0; // offline
+        };
+        const swA = statusWeight(a.status);
+        const swB = statusWeight(b.status);
+        if (swA !== swB) return swB - swA;
+        
+        return a.username.localeCompare(b.username);
+    });
+
+    setStaffList(finalArray);
+    setIsStaffLoading(false);
   };
 
   const handleLogin = () => {
@@ -190,6 +292,7 @@ const LoginPage: React.FC = () => {
     setUser(null);
     setAccessDenied(false);
     setStaffList([]);
+    setUserRoleInfo(null);
   };
 
   const filteredStaff = staffList.filter(member => 
@@ -278,8 +381,8 @@ const LoginPage: React.FC = () => {
                ============================== */
             <div className="w-full flex flex-col md:flex-row gap-8 h-full animate-in fade-in slide-in-from-bottom-4 duration-700">
                 
-                {/* LEFT: User Profile */}
-                <div className="w-full md:w-1/3 flex flex-col bg-white/[0.02] border border-white/5 rounded-3xl p-6 h-fit">
+                {/* LEFT: User Profile - Ширина увеличена с 1/3 до 420px для длинных ников */}
+                <div className="w-full md:w-[420px] shrink-0 flex flex-col bg-white/[0.02] border border-white/5 rounded-3xl p-6 h-fit">
                     <div className="flex items-center gap-4 mb-6">
                         <img 
                             src={user.avatar ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png` : 'https://cdn.discordapp.com/embed/avatars/0.png'} 
@@ -287,7 +390,7 @@ const LoginPage: React.FC = () => {
                             className="w-16 h-16 rounded-full border border-purple-500/30"
                         />
                         <div className="overflow-hidden">
-                            <h3 className="text-lg font-bold text-white truncate">{user.username}</h3>
+                            <h3 className="text-lg font-bold text-white truncate" title={user.username}>{user.username}</h3>
                             <div className="flex items-center gap-2 text-[10px] text-emerald-500 font-bold uppercase tracking-wider">
                                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
                                 Authorized
@@ -298,11 +401,13 @@ const LoginPage: React.FC = () => {
                     <div className="space-y-2 mb-8">
                         <div className="flex justify-between items-center text-xs py-2 border-b border-white/5">
                             <span className="text-zinc-500">Role</span>
-                            <span className="text-purple-400 font-medium">Staff Member</span>
+                            <span className={`font-medium ${userRoleInfo?.color || 'text-purple-400'}`}>
+                                {userRoleInfo?.name || 'Staff Member'}
+                            </span>
                         </div>
                         <div className="flex justify-between items-center text-xs py-2 border-b border-white/5">
                             <span className="text-zinc-500">ID</span>
-                            <span className="text-zinc-400 font-mono">{user.id.slice(0,8)}...</span>
+                            <span className="text-zinc-400 font-mono">{user.id.slice(0,10)}...</span>
                         </div>
                     </div>
 
@@ -315,19 +420,19 @@ const LoginPage: React.FC = () => {
                 </div>
 
                 {/* RIGHT: Staff Directory */}
-                <div className="w-full md:w-2/3 flex flex-col">
+                <div className="w-full md:flex-1 flex flex-col">
                     <div className="flex items-center justify-between mb-6">
                         <div>
                             <h2 className="text-2xl font-bold flex items-center gap-3">
-                                Active Personnel
+                                Staff Directory
                                 <span className="text-xs bg-purple-500/20 text-purple-300 px-2 py-1 rounded-md border border-purple-500/20">
                                     {isStaffLoading ? '...' : staffList.length}
                                 </span>
                             </h2>
                             <p className="text-xs text-zinc-500 mt-1">
                                 {widgetError 
-                                    ? <span className="text-red-400 flex items-center gap-1"><AlertCircle className="w-3 h-3"/> Enable "Server Widget" in Discord Settings!</span> 
-                                    : 'Real-time database from server widget.'}
+                                    ? <span className="text-red-400 flex items-center gap-1"><AlertCircle className="w-3 h-3"/> Widget Offline - Showing Registry Only</span> 
+                                    : 'Synced with Widget + Registry.'}
                             </p>
                         </div>
                         <div className="hidden md:block p-2 bg-white/5 rounded-full">
@@ -367,7 +472,7 @@ const LoginPage: React.FC = () => {
                                         </div>
                                         <div>
                                             <h4 className="text-sm font-bold text-zinc-200 group-hover:text-white transition-colors">{member.username}</h4>
-                                            <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider group-hover:text-purple-400 transition-colors">
+                                            <span className={`text-[10px] font-bold uppercase tracking-wider transition-colors ${member.roleColor || 'text-zinc-500 group-hover:text-purple-400'}`}>
                                                 {member.roleName}
                                             </span>
                                         </div>
@@ -379,7 +484,7 @@ const LoginPage: React.FC = () => {
                             ))
                         ) : (
                             <div className="text-center py-10 text-zinc-600 text-xs uppercase tracking-widest">
-                                {widgetError ? 'Widget Disabled' : 'No active members found'}
+                                {widgetError ? 'Widget Disabled & Registry Empty' : 'No active members found'}
                             </div>
                         )}
                     </div>
