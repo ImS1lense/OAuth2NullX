@@ -29,37 +29,33 @@
         background-color: #050505;
       }
 
-      /* === CUSTOM SCROLLBAR === */
-      /* Width */
+      /* === CUSTOM NEON SCROLLBAR === */
       ::-webkit-scrollbar {
         width: 6px;
         height: 6px;
       }
 
-      /* Track */
       ::-webkit-scrollbar-track {
         background: #09090b; 
-        border-radius: 10px;
+        border-radius: 4px;
       }
       
-      /* Handle */
       ::-webkit-scrollbar-thumb {
-        background: #27272a; 
-        border-radius: 10px;
+        background: #5b21b6; /* Deep Purple */
+        border-radius: 4px;
         border: 1px solid #09090b;
         transition: all 0.3s ease;
       }
 
-      /* Handle on hover */
       ::-webkit-scrollbar-thumb:hover {
-        background: #a855f7; /* Purple hover */
-        box-shadow: 0 0 10px rgba(168, 85, 247, 0.5);
+        background: #8b5cf6; /* Violet */
+        box-shadow: 0 0 10px rgba(139, 92, 246, 0.5);
       }
 
-      /* Firefox */
+      /* Firefox support */
       * {
         scrollbar-width: thin;
-        scrollbar-color: #27272a #09090b;
+        scrollbar-color: #5b21b6 #09090b;
       }
     </style>
   <script type="importmap">
@@ -72,8 +68,10 @@
   }
 }
 </script>
+<link rel="stylesheet" href="/index.css">
 </head>
   <body>
     <div id="root"></div>
-  </body>
+  <script type="module" src="/index.tsx"></script>
+</body>
 </html>
