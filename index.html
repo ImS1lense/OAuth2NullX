@@ -26,22 +26,40 @@
     <style>
       body {
         font-family: 'Unbounded', sans-serif;
-        background-color: #09090b;
+        background-color: #050505;
       }
 
-      /* Custom scrollbar */
+      /* === CUSTOM SCROLLBAR === */
+      /* Width */
       ::-webkit-scrollbar {
-        width: 8px;
+        width: 6px;
+        height: 6px;
       }
+
+      /* Track */
       ::-webkit-scrollbar-track {
-        background: #09090b;
+        background: #09090b; 
+        border-radius: 10px;
       }
+      
+      /* Handle */
       ::-webkit-scrollbar-thumb {
-        background: #3f3f46;
-        border-radius: 4px;
+        background: #27272a; 
+        border-radius: 10px;
+        border: 1px solid #09090b;
+        transition: all 0.3s ease;
       }
+
+      /* Handle on hover */
       ::-webkit-scrollbar-thumb:hover {
-        background: #52525b;
+        background: #a855f7; /* Purple hover */
+        box-shadow: 0 0 10px rgba(168, 85, 247, 0.5);
+      }
+
+      /* Firefox */
+      * {
+        scrollbar-width: thin;
+        scrollbar-color: #27272a #09090b;
       }
     </style>
   <script type="importmap">
@@ -54,10 +72,8 @@
   }
 }
 </script>
-<link rel="stylesheet" href="/index.css">
 </head>
   <body>
     <div id="root"></div>
-  <script type="module" src="/index.tsx"></script>
-</body>
+  </body>
 </html>

@@ -26,22 +26,24 @@ const ROLE_DEFINITIONS: Record<string, { name: string, color: string, weight: nu
 };
 
 // 2. СПРАВОЧНИК СОТРУДНИКОВ (ID -> RoleID)
-// Внесите сюда ID своих сотрудников, чтобы:
-// а) Видеть их роль (Куратор, Модератор и т.д.) вместо "Active Staff".
-// б) Видеть их в списке, даже если они OFFLINE (Inactive).
+// ВАЖНО: Чтобы у других пользователей (не у вас) писалась роль вместо "Active Staff"
+// И чтобы они показывались в списке когда OFFLINE, вы ДОЛЖНЫ добавить их User ID сюда.
 interface KnownStaff {
-    id: string;
-    roleId: string;
-    fallbackName: string; // Имя для отображения, если юзер offline и виджет его не видит
+    id: string; // Discord User ID (длинные цифры пользователя)
+    roleId: string; // ID роли из списка выше
+    fallbackName: string; // Имя (используется если юзер оффлайн и виджет его не видит)
 }
 
 const KNOWN_STAFF_DIRECTORY: KnownStaff[] = [
-    // ПРИМЕРЫ (Замените ID на реальные ID ваших сотрудников):
-    // { id: "123456789", roleId: "1458159110720589944", fallbackName: "Egorov" },
-    // { id: "987654321", roleId: "1458158896894967879", fallbackName: "lowcode" },
+    // === СЮДА ВПИШИТЕ ID ВАШИХ СОТРУДНИКОВ ===
+    // Пример для Egorov (если знаете ID, замените 'REPLACE_ME'):
+    // { id: "REPLACE_ME_WITH_REAL_ID", roleId: "1458159110720589944", fallbackName: "Egorov" },
     
-    // Тестовый неактивный пользователь для демонстрации:
-    { id: "000000000000000001", roleId: "1458277039399374991", fallbackName: "Offline Curator (Example)" },
+    // Пример для lowcode:
+    // { id: "REPLACE_ME_WITH_REAL_ID", roleId: "1458158896894967879", fallbackName: "lowcode" },
+    
+    // Пример неактивного (Offline) куратора для теста:
+    { id: "000000000000000001", roleId: "1458277039399374991", fallbackName: "System Curator" },
 ];
 
 // Функция для выбора правильного Redirect URI
@@ -79,7 +81,7 @@ interface StaffDisplay {
   roleColor?: string; 
   isCurrentUser: boolean;
   status: string;
-  weight: number; // Для сортировки
+  weight: number;
 }
 
 const LoginPage: React.FC = () => {
@@ -97,17 +99,26 @@ const LoginPage: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [widgetError, setWidgetError] = useState(false);
 
+  // === SESSION MANAGEMENT ===
   useEffect(() => {
+    // 1. Проверяем URL хеш (редирект после логина)
     const fragment = new URLSearchParams(window.location.hash.slice(1));
     const accessToken = fragment.get('access_token');
 
     if (accessToken) {
+      // Очищаем URL и сохраняем токен
       window.history.replaceState({}, document.title, window.location.pathname);
+      localStorage.setItem('discord_token', accessToken);
       verifyUserAndRole(accessToken);
+    } else {
+      // 2. Иначе проверяем LocalStorage (сохраненная сессия)
+      const storedToken = localStorage.getItem('discord_token');
+      if (storedToken) {
+        verifyUserAndRole(storedToken);
+      }
     }
   }, []);
 
-  // Вспомогательная функция для определения лучшей роли из списка ID ролей
   const getBestRole = (roles: string[]) => {
       let bestRole = { name: 'Staff Member', color: 'text-zinc-500', weight: 0 };
       
@@ -129,6 +140,12 @@ const LoginPage: React.FC = () => {
       const userRes = await fetch('https://discord.com/api/users/@me', {
         headers: { Authorization: `Bearer ${token}` },
       });
+      
+      if (userRes.status === 401) {
+          // Токен протух
+          throw new Error('Token expired');
+      }
+      
       if (!userRes.ok) throw new Error('Failed to fetch user');
       const userData = await userRes.json();
 
@@ -152,7 +169,6 @@ const LoginPage: React.FC = () => {
         const roleInfo = getBestRole(roles);
         setUserRoleInfo(roleInfo);
         
-        // Запускаем сборку списка сотрудников
         fetchStaffList(userData.id, roles, userData, roleInfo);
       } else {
         setAccessDenied(true);
@@ -160,9 +176,15 @@ const LoginPage: React.FC = () => {
 
     } catch (error) {
       console.error('Auth Error:', error);
-      setAccessDenied(true);
-    } finally {
+      // Если ошибка (например, токен истек), разлогиниваем
+      localStorage.removeItem('discord_token');
+      setUser(null);
+      if ((error as Error).message !== 'Token expired') {
+          // setAccessDenied(true); // Можно не показывать Denied, а просто форму логина
+      }
       setLoading(false);
+    } finally {
+      if (user) setLoading(false); // Only unset loading if we succeeded inside, otherwise handled in catch
     }
   };
 
@@ -175,17 +197,16 @@ const LoginPage: React.FC = () => {
     setIsStaffLoading(true);
     setWidgetError(false);
     
-    // Словарь для быстрого доступа к списку сотрудников
     const staffMap = new Map<string, StaffDisplay>();
 
-    // 1. Сначала добавляем всех из KNOWN_STAFF_DIRECTORY (по умолчанию считаем offline)
+    // 1. Загружаем из реестра "известных" сотрудников (для Offline и Ролей)
     KNOWN_STAFF_DIRECTORY.forEach(known => {
         const roleDef = ROLE_DEFINITIONS[known.roleId] || { name: 'Staff Member', color: 'text-zinc-500', weight: 0 };
         
         staffMap.set(known.id, {
             id: known.id,
             username: known.fallbackName,
-            avatarUrl: 'https://cdn.discordapp.com/embed/avatars/0.png', // Дефолт, если виджет не найдет
+            avatarUrl: 'https://cdn.discordapp.com/embed/avatars/0.png',
             roleName: roleDef.name,
             roleColor: roleDef.color,
             status: 'offline', // По умолчанию
@@ -195,34 +216,33 @@ const LoginPage: React.FC = () => {
     });
 
     try {
-      // 2. Получаем онлайн пользователей через Widget
+      // 2. Грузим Widget
       const response = await fetch(`https://discord.com/api/guilds/${TARGET_GUILD_ID}/widget.json`);
 
-      if (response.status === 403) {
-        throw new Error('Widget disabled');
-      }
+      if (response.status === 403) throw new Error('Widget disabled');
       
       const data = await response.json();
       const members: WidgetMember[] = data.members || [];
 
-      // 3. Мержим данные виджета
+      // 3. Мерджим Widget данные
       members.forEach(m => {
-          if (m.id === currentUserId) return; // Пропускаем себя, добавим в конце
+          if (m.id === currentUserId) return; // Скипаем себя
 
           const existing = staffMap.get(m.id);
           
           if (existing) {
-              // Если юзер есть в справочнике -> обновляем статус, аватар и имя
+              // Юзер есть в реестре: обновляем статус на актуальный (online)
+              // Роль берется из реестра (так как виджет её не дает)
               existing.status = m.status;
               existing.avatarUrl = m.avatar_url;
-              existing.username = m.username; // Обновляем имя на актуальное
+              existing.username = m.username;
           } else {
-              // Если юзера нет в справочнике -> добавляем как обычного активного стаффа
+              // Юзера нет в реестре: добавляем как обычного Active Staff
               staffMap.set(m.id, {
                   id: m.id,
                   username: m.username,
                   avatarUrl: m.avatar_url,
-                  roleName: 'Active Staff',
+                  roleName: 'Active Staff', // Неизвестная роль
                   roleColor: 'text-zinc-500',
                   status: m.status,
                   isCurrentUser: false,
@@ -236,8 +256,7 @@ const LoginPage: React.FC = () => {
       setWidgetError(true);
     }
 
-    // 4. Добавляем ТЕКУЩЕГО пользователя (перезаписываем, чтобы данные были точными)
-    // Текущий пользователь всегда Online для себя
+    // 4. Добавляем себя (данные из токена самые точные)
     staffMap.set(currentUserId, {
         id: currentUserId,
         username: currentUserData.username,
@@ -248,27 +267,24 @@ const LoginPage: React.FC = () => {
         roleColor: currentUserRoleInfo.color,
         status: 'online',
         isCurrentUser: true,
-        weight: 100 // Всегда сверху или спец сортировка
+        weight: 100
     });
 
-    // 5. Превращаем Map в массив и сортируем
     const finalArray = Array.from(staffMap.values());
 
     finalArray.sort((a, b) => {
         if (a.isCurrentUser) return -1;
         if (b.isCurrentUser) return 1;
 
-        // Сортировка по весу роли (Curator > Chief > ... > Trainee > Active Staff)
-        if (a.weight !== b.weight) {
-            return b.weight - a.weight;
-        }
+        // Сортировка по весу роли
+        if (a.weight !== b.weight) return b.weight - a.weight;
 
-        // Если роли равны, сортировка по статусу
+        // Сортировка по статусу
         const statusWeight = (s: string) => {
             if (s === 'online') return 3;
             if (s === 'idle') return 2;
             if (s === 'dnd') return 1;
-            return 0; // offline
+            return 0;
         };
         const swA = statusWeight(a.status);
         const swB = statusWeight(b.status);
@@ -289,10 +305,12 @@ const LoginPage: React.FC = () => {
   };
 
   const handleLogout = () => {
+    localStorage.removeItem('discord_token');
     setUser(null);
     setAccessDenied(false);
     setStaffList([]);
     setUserRoleInfo(null);
+    window.location.hash = '';
   };
 
   const filteredStaff = staffList.filter(member => 
@@ -302,7 +320,7 @@ const LoginPage: React.FC = () => {
   return (
     <div className="min-h-screen w-full bg-[#050505] text-white overflow-hidden flex flex-col items-center justify-center relative selection:bg-purple-500/30 font-sans">
       
-      {/* --- BACKGROUND EFFECTS --- */}
+      {/* BACKGROUND */}
       <div className="absolute inset-0 z-0 opacity-[0.07]" 
            style={{ 
              backgroundImage: 'linear-gradient(to right, #808080 1px, transparent 1px), linear-gradient(to bottom, #808080 1px, transparent 1px)',
@@ -312,14 +330,13 @@ const LoginPage: React.FC = () => {
       </div>
       <div className="absolute inset-0 z-0 opacity-[0.03] pointer-events-none" style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E")` }}></div>
 
-      {/* Dynamic Ambient Glows */}
+      {/* Glows */}
       <div className="absolute top-0 left-0 w-full h-full overflow-hidden pointer-events-none z-0">
         <div className={`absolute top-[-10%] left-[20%] w-[500px] h-[500px] rounded-full blur-[120px] transition-colors duration-1000 ${accessDenied ? 'bg-red-600/10' : 'bg-purple-600/10'}`} />
         <div className={`absolute bottom-[-10%] right-[20%] w-[600px] h-[600px] rounded-full blur-[100px] transition-colors duration-1000 ${accessDenied ? 'bg-orange-600/5' : 'bg-indigo-600/5'}`} />
       </div>
 
-      {/* --- MAIN CONTAINER --- */}
-      <div className={`relative z-10 w-full transition-all duration-700 ease-in-out ${user ? 'max-w-4xl' : 'max-w-[480px]'} p-4`}>
+      <div className={`relative z-10 w-full transition-all duration-700 ease-in-out ${user ? 'max-w-5xl' : 'max-w-[480px]'} p-4`}>
         <div className={`relative backdrop-blur-2xl border transition-all duration-500 rounded-[2.5rem] flex flex-col items-center shadow-2xl overflow-hidden
             ${accessDenied 
                 ? 'bg-[#0f0505]/95 border-red-500/20 shadow-red-900/10 p-10 md:p-14' 
@@ -328,7 +345,7 @@ const LoginPage: React.FC = () => {
                     : 'bg-[#0a0a0a]/90 border-white/5 p-10 md:p-14'
             }`}>
           
-          {/* HEADER SECTION */}
+          {/* LOGO / HEADER */}
           {!user && (
               <div className="text-center mb-12 relative w-full flex flex-col items-center">
                 {!mainLogoError ? (
@@ -355,14 +372,13 @@ const LoginPage: React.FC = () => {
               </div>
           )}
 
-          {/* STATE MANAGER */}
+          {/* MAIN CONTENT */}
           {loading ? (
             <div className="flex flex-col items-center gap-4 py-10">
               <div className="w-10 h-10 border-2 border-purple-500/30 border-t-purple-500 rounded-full animate-spin"></div>
               <span className="text-xs font-bold text-zinc-500 uppercase tracking-widest animate-pulse">{statusMessage}</span>
             </div>
           ) : accessDenied ? (
-            /* ACCESS DENIED */
             <div className="flex flex-col items-center animate-in fade-in zoom-in duration-300 w-full">
               <div className="w-20 h-20 bg-red-500/10 rounded-full flex items-center justify-center mb-6 border border-red-500/20">
                 <Ban className="w-10 h-10 text-red-500" />
@@ -376,22 +392,19 @@ const LoginPage: React.FC = () => {
               </button>
             </div>
           ) : user ? (
-            /* ==============================
-               STAFF DASHBOARD VIEW
-               ============================== */
             <div className="w-full flex flex-col md:flex-row gap-8 h-full animate-in fade-in slide-in-from-bottom-4 duration-700">
                 
-                {/* LEFT: User Profile - Ширина увеличена с 1/3 до 420px для длинных ников */}
-                <div className="w-full md:w-[420px] shrink-0 flex flex-col bg-white/[0.02] border border-white/5 rounded-3xl p-6 h-fit">
+                {/* USER PROFILE COLUMN (Increased width for long names) */}
+                <div className="w-full md:w-[450px] shrink-0 flex flex-col bg-white/[0.02] border border-white/5 rounded-3xl p-6 h-fit">
                     <div className="flex items-center gap-4 mb-6">
                         <img 
                             src={user.avatar ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png` : 'https://cdn.discordapp.com/embed/avatars/0.png'} 
                             alt="Me" 
                             className="w-16 h-16 rounded-full border border-purple-500/30"
                         />
-                        <div className="overflow-hidden">
-                            <h3 className="text-lg font-bold text-white truncate" title={user.username}>{user.username}</h3>
-                            <div className="flex items-center gap-2 text-[10px] text-emerald-500 font-bold uppercase tracking-wider">
+                        <div className="overflow-hidden min-w-0">
+                            <h3 className="text-lg font-bold text-white truncate pr-2" title={user.username}>{user.username}</h3>
+                            <div className="flex items-center gap-2 text-[10px] text-emerald-500 font-bold uppercase tracking-wider mt-1">
                                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
                                 Authorized
                             </div>
@@ -407,7 +420,7 @@ const LoginPage: React.FC = () => {
                         </div>
                         <div className="flex justify-between items-center text-xs py-2 border-b border-white/5">
                             <span className="text-zinc-500">ID</span>
-                            <span className="text-zinc-400 font-mono">{user.id.slice(0,10)}...</span>
+                            <span className="text-zinc-400 font-mono">{user.id}</span>
                         </div>
                     </div>
 
@@ -419,7 +432,7 @@ const LoginPage: React.FC = () => {
                     </button>
                 </div>
 
-                {/* RIGHT: Staff Directory */}
+                {/* DIRECTORY COLUMN */}
                 <div className="w-full md:flex-1 flex flex-col">
                     <div className="flex items-center justify-between mb-6">
                         <div>
@@ -429,10 +442,8 @@ const LoginPage: React.FC = () => {
                                     {isStaffLoading ? '...' : staffList.length}
                                 </span>
                             </h2>
-                            <p className="text-xs text-zinc-500 mt-1">
-                                {widgetError 
-                                    ? <span className="text-red-400 flex items-center gap-1"><AlertCircle className="w-3 h-3"/> Widget Offline - Showing Registry Only</span> 
-                                    : 'Synced with Widget + Registry.'}
+                            <p className="text-[10px] text-zinc-500 mt-1 uppercase tracking-wider opacity-60">
+                                Synced with Widget + Registry
                             </p>
                         </div>
                         <div className="hidden md:block p-2 bg-white/5 rounded-full">
@@ -440,7 +451,6 @@ const LoginPage: React.FC = () => {
                         </div>
                     </div>
 
-                    {/* Search Bar */}
                     <div className="relative mb-6 group">
                         <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500 group-focus-within:text-purple-400 transition-colors" />
                         <input 
@@ -452,8 +462,7 @@ const LoginPage: React.FC = () => {
                         />
                     </div>
 
-                    {/* List */}
-                    <div className="flex-1 overflow-y-auto max-h-[400px] pr-2 space-y-2 custom-scrollbar">
+                    <div className="flex-1 overflow-y-auto max-h-[400px] pr-2 space-y-2">
                         {isStaffLoading ? (
                              <div className="flex flex-col items-center justify-center py-12 gap-2 text-zinc-500">
                                 <RefreshCw className="w-6 h-6 animate-spin" />
@@ -470,7 +479,7 @@ const LoginPage: React.FC = () => {
                                                   member.status === 'idle' ? 'bg-yellow-500' : 
                                                   member.status === 'dnd' ? 'bg-red-500' : 'bg-zinc-500'}`}></div>
                                         </div>
-                                        <div>
+                                        <div className="flex flex-col">
                                             <h4 className="text-sm font-bold text-zinc-200 group-hover:text-white transition-colors">{member.username}</h4>
                                             <span className={`text-[10px] font-bold uppercase tracking-wider transition-colors ${member.roleColor || 'text-zinc-500 group-hover:text-purple-400'}`}>
                                                 {member.roleName}
@@ -484,14 +493,14 @@ const LoginPage: React.FC = () => {
                             ))
                         ) : (
                             <div className="text-center py-10 text-zinc-600 text-xs uppercase tracking-widest">
-                                {widgetError ? 'Widget Disabled & Registry Empty' : 'No active members found'}
+                                {widgetError ? 'Widget Disabled' : 'No active members found'}
                             </div>
                         )}
                     </div>
                 </div>
             </div>
           ) : (
-            /* INITIAL LOGIN */
+            /* LOGIN SCREEN */
             <>
                 <div className="w-full mb-10">
                     <button 
