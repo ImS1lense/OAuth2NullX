@@ -27,11 +27,11 @@ const ALLOWED_ADMIN_IDS = [
 // ВАЖНО: ЗДЕСЬ БУДЕТ АДРЕС ВАШЕГО БЭКЕНДА ПОСЛЕ ЗАГРУЗКИ НА RENDER
 // Пока вы на локалке, он будет использовать localhost.
 // Когда зальете, поменяйте строку ниже на адрес с Render, например: 'https://my-nullx-bot.onrender.com/api'
-const PROD_API_URL = 'ВСТАВЬТЕ_СЮДА_ССЫЛКУ_С_RENDER_КОГДА_ПОЛУЧИТЕ_ЕЕ'; 
+const PROD_API_URL = 'https://nullx-bot.onrender.com/api'; 
 
 const API_URL = (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'))
     ? 'http://localhost:4000/api'
-    : (PROD_API_URL !== 'ВСТАВЬТЕ_СЮДА_ССЫЛКУ_С_RENDER_КОГДА_ПОЛУЧИТЕ_ЕЕ' ? PROD_API_URL : 'http://localhost:4000/api');
+    : (PROD_API_URL !== 'https://nullx-bot.onrender.com/api' ? PROD_API_URL : 'http://localhost:4000/api');
 
 interface RoleDef {
     id: string;
